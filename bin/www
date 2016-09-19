@@ -1,0 +1,163 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+var app = require('../app');
+var debug = require('debug')('v.io:server');
+var fs = require('fs');
+var http = require('http');
+var path = require('path');
+var uuid = require('node-uuid');
+
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || '3000');
+app.set('port', port);
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+var io = require('socket.io')(server);
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
+
+/**
+ * Socket IO listening.
+ */
+io.on('connection', function (socket) {
+  socket.on('message', function (data) {
+    var fileName = uuid.v4();
+
+    socket.emit('ffmpeg-output', 0);
+
+    writeToDisk(data.audio.dataURL, fileName + '.wav');
+
+    // Chrome
+    if (data.video) {
+      writeToDisk(data.video.dataURL, fileName + '.webm');
+      merge(socket, fileName);
+    }
+
+    // Firefox or user is recording only audio
+    else socket.emit('merged', fileName + '.wav');
+  });
+});
+
+function writeToDisk(dataURL, fileName) {
+  var fileExtension = fileName.split('.').pop();
+  var fileRootNameWithBase = './public/uploads/' + fileName;
+  var filePath = fileRootNameWithBase;
+  var fileID = 2;
+  var fileBuffer;
+
+  while (fs.existsSync(filePath)) {
+    filePath = fileRootNameWithBase + '(' + fileID + ').' + fileExtension;
+    fileID += 1;
+  }
+
+  dataURL = dataURL.split(',').pop();
+  fileBuffer = new Buffer(dataURL, 'base64');
+  fs.writeFileSync(filePath, fileBuffer);
+}
+
+function merge(socket, fileName) {
+  var FFmpeg = require('fluent-ffmpeg');
+
+  var audioFile = path.join(__dirname, '../public/uploads', fileName + '.wav');
+  var videoFile = path.join(__dirname, '../public/uploads', fileName + '.webm');
+  var mergedFile = path.join(__dirname, '../public/uploads', fileName + '-merged.webm');
+
+  debug('Merging started');
+
+  new FFmpeg({
+    source: videoFile
+  })
+    .addInput(audioFile)
+    .on('error', function (err) {
+      socket.emit('ffmpeg-error', 'ffmpeg : An error occurred: ' + err.message);
+    })
+    .on('progress', function (progress) {
+      socket.emit('ffmpeg-output', Math.round(progress.percent));
+    })
+    .on('end', function () {
+      socket.emit('merged', fileName + '-merged.webm');
+      debug('Merging finished !');
+
+      // removing audio/video files
+      // fs.unlink(audioFile);
+      // fs.unlink(videoFile);
+    })
+    .saveToFile(mergedFile);
+}
